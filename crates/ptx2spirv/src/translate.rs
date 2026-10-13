@@ -142,6 +142,12 @@ fn two_types(i: &Inst) -> R<(Scalar, Scalar)> {
     Ok((ts[ts.len() - 2], ts[ts.len() - 1]))
 }
 
+/// Packed-half types (`.f16x2` / `.bf16x2`): two 16-bit floats in a 32-bit
+/// register. ggml's `half2`/`__hadd2`/`__hfma2` paths lower to these.
+fn is_packed_half(s: Scalar) -> bool {
+    matches!(s, Scalar::F16x2 | Scalar::BF16x2)
+}
+
 fn space_of(i: &Inst) -> StateSpace {
     for m in &i.mods {
         match m.as_str() {
@@ -1419,6 +1425,9 @@ impl<'a> Compiler<'a> {
 
     fn binary(&mut self, i: &Inst) -> R<()> {
         let t = inst_type(i)?;
+        if is_packed_half(t) {
+            return self.packed_binary(i, t);
+        }
         let ty = self.ty_of(t);
         let k = t.kind();
         let signed = k == ScalarKind::Signed;
@@ -1552,6 +1561,14 @@ impl<'a> Compiler<'a> {
 
     fn mad(&mut self, i: &Inst) -> R<()> {
         let t = inst_type(i)?;
+        if is_packed_half(t) {
+            let f32x2 = self.f32x2_ty();
+            let a = self.read_packed_f32x2(arg(i, 1)?, t)?;
+            let b = self.read_packed_f32x2(arg(i, 2)?, t)?;
+            let c = self.read_packed_f32x2(arg(i, 3)?, t)?;
+            let r = self.b.ext(f32x2, cl::FMA, &[a, b, c]);
+            return self.write_packed(arg(i, 0)?, r, t);
+        }
         let ty = self.ty_of(t);
         let signed = t.is_signed();
         let dst = arg(i, 0)?;
@@ -1598,6 +1615,16 @@ impl<'a> Compiler<'a> {
 
     fn unary(&mut self, i: &Inst) -> R<()> {
         let t = inst_type(i)?;
+        if is_packed_half(t) {
+            let f32x2 = self.f32x2_ty();
+            let a = self.read_packed_f32x2(arg(i, 1)?, t)?;
+            let r = match i.op.as_str() {
+                "neg" => self.b.op(op::F_NEGATE, f32x2, &[a]),
+                "abs" => self.b.ext(f32x2, cl::FABS, &[a]),
+                o => return Err(format!("packed-half {o} is not supported")),
+            };
+            return self.write_packed(arg(i, 0)?, r, t);
+        }
         let ty = self.ty_of(t);
         let float = t.is_float();
         let signed = t.is_signed();
@@ -1861,14 +1888,152 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    // ------------------------------------------------------ packed half
+
+    /// `vector(f32, 2)` — the internal representation for packed-half
+    /// arithmetic. Computing in f32 and rounding once at the end is at least
+    /// as accurate as per-lane f16 rounding, which is fine for inference.
+    fn f32x2_ty(&mut self) -> Id {
+        let f = self.b.float(32);
+        self.b.vector(f, 2)
+    }
+
+    /// Read a packed-half operand (a 32-bit register) as `vector(f32, 2)`,
+    /// lane 0 = low 16 bits, lane 1 = high 16 bits.
+    fn read_packed_f32x2(&mut self, o: &Operand, t: Scalar) -> R<Id> {
+        let u32t = self.b.int(32);
+        let bits = self.read(o, u32t, false)?;
+        let f32x2 = self.f32x2_ty();
+        match t {
+            Scalar::F16x2 => {
+                let half = self.b.float(16);
+                let h2 = self.b.vector(half, 2);
+                let hv = self.b.op(op::BITCAST, h2, &[bits]);
+                Ok(self.b.op(op::F_CONVERT, f32x2, &[hv]))
+            }
+            Scalar::BF16x2 => {
+                let u16t = self.b.int(16);
+                let i16x2 = self.b.vector(u16t, 2);
+                let iv = self.b.op(op::BITCAST, i16x2, &[bits]);
+                let f32t = self.b.float(32);
+                let s16 = self.b.const_u32(16);
+                let mut lanes = Vec::new();
+                for k in 0..2u32 {
+                    // bf16 -> f32: place the 16 bits in the high half of an f32
+                    let e = self.b.op(op::COMPOSITE_EXTRACT, u16t, &[iv, k]);
+                    let w = self.b.op(op::U_CONVERT, u32t, &[e]);
+                    let w = self.b.op(op::SHIFT_LEFT_LOGICAL, u32t, &[w, s16]);
+                    lanes.push(self.b.op(op::BITCAST, f32t, &[w]));
+                }
+                Ok(self.b.op(op::COMPOSITE_CONSTRUCT, f32x2, &lanes))
+            }
+            _ => Err("read_packed_f32x2 on a non-packed type".into()),
+        }
+    }
+
+    /// Round an f32 to bf16, returning the 16-bit pattern (round-to-nearest
+    /// even, quiet NaNs preserved). Mirrors the scalar path in `cvt_bf16`.
+    fn f32_to_bf16_bits(&mut self, f: Id) -> Id {
+        let u32t = self.b.int(32);
+        let u16t = self.b.int(16);
+        let s16 = self.b.const_u32(16);
+        let x = self.b.op(op::BITCAST, u32t, &[f]);
+        let one = self.b.const_u32(1);
+        let lsb = self.b.op(op::SHIFT_RIGHT_LOGICAL, u32t, &[x, s16]);
+        let lsb = self.b.op(op::BITWISE_AND, u32t, &[lsb, one]);
+        let bias = self.b.const_u32(0x7fff);
+        let bias = self.b.op(op::I_ADD, u32t, &[bias, lsb]);
+        let rounded = self.b.op(op::I_ADD, u32t, &[x, bias]);
+        let bt = self.b.bool();
+        let nan = self.b.op(op::IS_NAN, bt, &[f]);
+        let qnan = self.b.const_u32(0x7fc0_0000);
+        let rounded = self.b.op(op::SELECT, u32t, &[nan, qnan, rounded]);
+        let h = self.b.op(op::SHIFT_RIGHT_LOGICAL, u32t, &[rounded, s16]);
+        self.b.op(op::U_CONVERT, u16t, &[h])
+    }
+
+    /// Pack a `vector(f32, 2)` back into the 32-bit register bits for `t`.
+    fn pack_from_f32x2(&mut self, v: Id, t: Scalar) -> Id {
+        let u32t = self.b.int(32);
+        match t {
+            Scalar::F16x2 => {
+                let half = self.b.float(16);
+                let h2 = self.b.vector(half, 2);
+                let hv = self.b.op(op::F_CONVERT, h2, &[v]);
+                self.b.op(op::BITCAST, u32t, &[hv])
+            }
+            Scalar::BF16x2 => {
+                let f32t = self.b.float(32);
+                let u16t = self.b.int(16);
+                let i16x2 = self.b.vector(u16t, 2);
+                let mut lanes = Vec::new();
+                for k in 0..2u32 {
+                    let f = self.b.op(op::COMPOSITE_EXTRACT, f32t, &[v, k]);
+                    lanes.push(self.f32_to_bf16_bits(f));
+                }
+                let iv = self.b.op(op::COMPOSITE_CONSTRUCT, i16x2, &lanes);
+                self.b.op(op::BITCAST, u32t, &[iv])
+            }
+            _ => v,
+        }
+    }
+
+    /// Write a `vector(f32, 2)` result to a packed-half destination register.
+    fn write_packed(&mut self, d: &Operand, v: Id, t: Scalar) -> R<()> {
+        let bits = self.pack_from_f32x2(v, t);
+        let u32t = self.b.int(32);
+        self.write(d, bits, u32t, false)
+    }
+
+    /// `add/sub/mul/min/max.{f16x2,bf16x2}`.
+    fn packed_binary(&mut self, i: &Inst, t: Scalar) -> R<()> {
+        let f32x2 = self.f32x2_ty();
+        let a = self.read_packed_f32x2(arg(i, 1)?, t)?;
+        let b = self.read_packed_f32x2(arg(i, 2)?, t)?;
+        let r = match i.op.as_str() {
+            "add" => self.b.op(op::F_ADD, f32x2, &[a, b]),
+            "sub" => self.b.op(op::F_SUB, f32x2, &[a, b]),
+            "mul" => self.b.op(op::F_MUL, f32x2, &[a, b]),
+            "min" => self.b.ext(f32x2, cl::FMIN, &[a, b]),
+            "max" => self.b.ext(f32x2, cl::FMAX, &[a, b]),
+            o => return Err(format!("packed-half {o} is not supported")),
+        };
+        self.write_packed(arg(i, 0)?, r, t)
+    }
+
     fn cvt(&mut self, i: &Inst) -> R<()> {
         let (dt, at) = two_types(i)?;
         let dty = self.ty_of(dt);
         let aty = self.ty_of(at);
         let dst = arg(i, 0)?;
         let src = arg(i, 1)?;
-        if matches!(dt, Scalar::F16x2 | Scalar::BF16x2) || matches!(at, Scalar::F16x2 | Scalar::BF16x2) {
-            return Err("packed half conversions are not supported yet".into());
+        if is_packed_half(dt) {
+            // pack two scalars: `cvt.rn.f16x2.f32 d, hi, lo`
+            //   d[31:16] = cvt(hi)   (lane 1)
+            //   d[15:0]  = cvt(lo)   (lane 0)
+            let hi_op = arg(i, 1)?;
+            let lo_op = arg(i, 2).map_err(|_| "packed-half cvt needs two source operands".to_string())?;
+            let f32t = self.b.float(32);
+            let to_f32 = |me: &mut Self, o: &Operand| -> R<Id> {
+                let v = me.read(o, aty, at.is_signed())?;
+                Ok(if at == Scalar::F32 {
+                    v
+                } else if at.is_float() {
+                    me.b.op(op::F_CONVERT, f32t, &[v])
+                } else if at.is_signed() {
+                    me.b.op(op::CONVERT_S_TO_F, f32t, &[v])
+                } else {
+                    me.b.op(op::CONVERT_U_TO_F, f32t, &[v])
+                })
+            };
+            let hi = to_f32(self, hi_op)?;
+            let lo = to_f32(self, lo_op)?;
+            let f32x2 = self.f32x2_ty();
+            let v = self.b.op(op::COMPOSITE_CONSTRUCT, f32x2, &[lo, hi]);
+            return self.write_packed(dst, v, dt);
+        }
+        if is_packed_half(at) {
+            return Err("cvt from a packed-half type is not supported (unpack with mov.b32)".into());
         }
         let a = self.read(src, aty, at.is_signed())?;
         let (dk, ak) = (dt.kind(), at.kind());
