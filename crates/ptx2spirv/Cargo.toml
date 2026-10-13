@@ -1,0 +1,12 @@
+[package]
+name = "ptx2spirv"
+version = "0.1.0"
+edition = "2021"
+description = "PTX to SPIR-V (OpenCL kernel environment) compiler"
+
+[dependencies]
+ptx = { path = "../ptx" }
+
+[[bin]]
+name = "ptx2spv"
+path = "src/main.rs"

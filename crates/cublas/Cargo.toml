@@ -1,0 +1,8 @@
+[package]
+name = "cublas"
+version = "0.1.0"
+edition = "2021"
+description = "cuBLAS shim (libcublas.so.12) on the ignuda driver"
+
+[lib]
+crate-type = ["cdylib"]

@@ -1,0 +1,12 @@
+[package]
+name = "cuda"
+version = "0.1.0"
+edition = "2021"
+description = "Drop-in libcuda / nvcuda replacement running on Intel GPUs"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ptx2spirv = { path = "../ptx2spirv" }
+ptx = { path = "../ptx" }

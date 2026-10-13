@@ -1,0 +1,9 @@
+/target
+*.spv
+# compiled sample binaries (ELF) and NVIDIA's redistributable runtime
+samples/driver_test
+samples/runtime_test
+samples/cublas_test
+samples/props_layout
+samples/libcudart.so.12
+samples/*.o

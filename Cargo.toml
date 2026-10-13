@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["crates/ptx", "crates/ptx2spirv", "crates/cuda", "crates/cudart", "crates/cublas"]
+
+[profile.release]
+debug = 1
+panic = "unwind"

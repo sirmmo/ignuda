@@ -1,0 +1,8 @@
+[package]
+name = "cudart"
+version = "0.1.0"
+edition = "2021"
+description = "CUDA runtime API (libcudart.so.12) implemented on the ignuda driver"
+
+[lib]
+crate-type = ["cdylib"]
