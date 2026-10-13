@@ -129,7 +129,15 @@ any NVIDIA component.
 
 ## Licence
 
-TBD by the project owner.
+Dual-licensed under either
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE)), or
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option — the same terms as [ZLUDA](https://github.com/vosen/ZLUDA).
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this work shall be dual-licensed as above, without
+any additional terms or conditions.
 
 ## Credits
 
