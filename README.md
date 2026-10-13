@@ -1,5 +1,7 @@
 # ignuda
 
+[![CI](https://github.com/sirmmo/ignuda/actions/workflows/ci.yml/badge.svg)](https://github.com/sirmmo/ignuda/actions/workflows/ci.yml)
+
 Run CUDA programs on Intel GPUs — a drop-in `libcuda` / `libcudart` that
 compiles NVIDIA PTX to SPIR-V and executes it through OpenCL + Intel's unified
 shared memory, in the spirit of [ZLUDA](https://github.com/vosen/ZLUDA).
@@ -92,8 +94,22 @@ provided for reproducible builds and testing:
 
 ```sh
 docker build -t ignuda-dev -f docker/dev.Dockerfile docker/
-./run-tests.sh         # builds and runs the full sample suite in the container
+./run-tests.sh         # builds and runs the sample suite in the container
 ```
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request, using no
+NVIDIA software at all:
+
+- **build** — builds every crate for Linux, cross-compiles the three libraries
+  for Windows (`x86_64-pc-windows-gnu`), runs the tests, then compiles the
+  committed PTX to SPIR-V and validates it with `spirv-val`. The resulting
+  Linux `.so` / Windows `.dll` libraries are uploaded as a build artifact.
+- **e2e** — installs Intel's OpenCL CPU runtime and runs the driver-API and
+  cuBLAS samples against ignuda end to end (the samples build against a bundled
+  clean-room `cuda.h`, so no CUDA toolkit is needed).
+- **lint** — `rustfmt` / `clippy`, advisory for now.
 
 ## Environment variables
 
