@@ -37,6 +37,7 @@ version = "0.1.0"
 name = "cuda"
 version = "0.1.0"
 dependencies = [
+ "cuda_types",
  "ptx",
  "ptx2spirv",
 ]
