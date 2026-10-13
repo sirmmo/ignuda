@@ -1,6 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["crates/ptx", "crates/ptx2spirv", "crates/cuda", "crates/cudart", "crates/cublas"]
+members = [
+    "crates/ptx",
+    "crates/ptx2spirv",
+    "crates/cuda",
+    "crates/cudart",
+    "crates/cublas",
+    # Vendored from ZLUDA (Apache-2.0 OR MIT); see vendor/README.md.
+    "vendor/ptx_parser",
+    "vendor/ptx_parser_macros",
+    "vendor/ptx_parser_macros_impl",
+    "vendor/cuda_types",
+]
 
 [profile.release]
 debug = 1
