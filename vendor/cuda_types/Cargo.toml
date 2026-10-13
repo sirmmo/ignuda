@@ -1,0 +1,13 @@
+# Vendored from ZLUDA (https://github.com/vosen/ZLUDA), crate `cuda_types`.
+# See vendor/README.md for provenance. The upstream crate depended on
+# `cuda_macros` and several ROCm `*-sys` crates purely for AMD-backend error
+# conversions; those `impl From<..>` blocks and dependencies were removed so
+# this is a backend-independent set of CUDA type/enum/struct definitions.
+[package]
+name = "cuda_types"
+version = "0.0.0"
+authors = ["Andrzej Janik <vosen@vosen.pl>"]
+edition = "2021"
+
+[dependencies]
+bitflags = "2.9.1"

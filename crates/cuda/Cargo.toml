@@ -10,3 +10,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 ptx2spirv = { path = "../ptx2spirv" }
 ptx = { path = "../ptx" }
+
+# Only used by tests (ABI conformance against ZLUDA's generated definitions);
+# the shipped libcuda does not depend on it. See vendor/README.md.
+[dev-dependencies]
+cuda_types = { path = "../../vendor/cuda_types" }

@@ -1,0 +1,21 @@
+# Vendored from ZLUDA (https://github.com/vosen/ZLUDA), crate `ptx_parser`,
+# commit 86ec0a93cc83ba5b52e645892523e339dfa884f7. Apache-2.0 OR MIT.
+# See vendor/README.md for provenance.
+[package]
+name = "ptx_parser"
+version = "0.0.0"
+authors = ["Andrzej Janik <vosen@vosen.pl>"]
+edition = "2021"
+
+[lib]
+
+[dependencies]
+bitflags = "1.2"
+derive_more = { version = "1", features = ["display"] }
+logos = "0.14"
+ptx_parser_macros = { path = "../ptx_parser_macros" }
+rustc-hash = "2.0.0"
+strum = { version = "0.28", features = ["derive"] }
+thiserror = "1.0"
+winnow = { version =  "0.6.18" }
+# winnow = { version =  "0.6.18", features = ["debug"] }

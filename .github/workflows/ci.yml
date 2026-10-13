@@ -50,7 +50,11 @@ jobs:
         run: cargo build --release --target x86_64-pc-windows-gnu -p cuda -p cudart -p cublas
 
       - name: Run tests
-        run: cargo test --workspace --release
+        # ignuda's own crates only; the vendored crates under vendor/ are
+        # third-party (ZLUDA) and their internal test suites are not part of
+        # ignuda's CI contract (and don't all compile under workspace-wide
+        # Cargo feature unification). They are still built by the build steps.
+        run: cargo test -p ptx -p ptx2spirv -p cuda -p cudart -p cublas --release
 
       - name: Compile PTX to SPIR-V and validate
         run: |

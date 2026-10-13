@@ -143,6 +143,18 @@ entirely with a clean-room implementation, so those libraries — and any checks
 inside them — are simply never loaded. The design deliberately avoids loading
 any NVIDIA component.
 
+## Third-party code
+
+Everything under `vendor/` is copied from
+[ZLUDA](https://github.com/vosen/ZLUDA) (Andrzej Janik and the ZLUDA authors),
+which is dual-licensed Apache-2.0 OR MIT — the same terms as ignuda. It brings
+in a mature PTX parser (`ptx_parser`) and the complete generated CUDA ABI
+(`cuda_types`), the latter with ZLUDA's AMD/ROCm error-conversion code removed.
+Exact provenance, per-crate changes, and what was deliberately *not* taken are
+documented in [`vendor/README.md`](vendor/README.md) and the repository
+[`NOTICE`](NOTICE). These crates build in the workspace; wiring them into
+ignuda's own compiler and types is in progress.
+
 ## Licence
 
 Dual-licensed under either
