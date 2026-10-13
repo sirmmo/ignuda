@@ -1,0 +1,129 @@
+name: Release
+
+# Cut a release by pushing a version tag:
+#
+#   git tag -a v0.1.0 -m "ignuda 0.1.0" && git push origin v0.1.0
+#
+# This builds the libraries for Linux and Windows exactly as CI does, compiles
+# and validates the sample SPIR-V, packages everything with the runtime
+# sonames an application expects, and publishes a GitHub Release with those
+# files attached. No GPU and no NVIDIA software are involved — the same as CI.
+#
+# `workflow_dispatch` lets a maintainer build the artifacts without tagging
+# (handy for a dry run); that path produces artifacts but no GitHub Release.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.85.0"
+
+permissions:
+  contents: write # needed to create the GitHub Release
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-mingw-w64-x86-64 spirv-tools
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+          rustup target add x86_64-pc-windows-gnu
+          rustc --version
+
+      - name: Build libraries (Linux, release)
+        run: cargo build --release -p cuda -p cudart -p cublas
+
+      - name: Cross-build libraries (Windows, x86_64-pc-windows-gnu)
+        run: cargo build --release --target x86_64-pc-windows-gnu -p cuda -p cudart -p cublas
+
+      - name: Compile and validate sample SPIR-V
+        run: |
+          set -e
+          cargo build --release -p ptx2spirv
+          PTX2SPV=target/release/ptx2spv
+          for ptx in kernels/gemm.ptx samples/kernels.ptx; do
+            out="${ptx##*/}"; out="${out%.ptx}.spv"
+            "$PTX2SPV" "$ptx" "$out"
+            spirv-val "$out"
+          done
+
+      - name: Determine version
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.0.0+$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building ignuda $VERSION"
+
+      - name: Package release artifacts
+        run: |
+          set -e
+          VERSION="${{ steps.ver.outputs.version }}"
+
+          # Linux: drop-in shared objects under the sonames an app dlopen()s.
+          LINUX="ignuda-${VERSION}-linux-x86_64"
+          mkdir -p "$LINUX"
+          cp target/release/libcuda.so   "$LINUX/libcuda.so.1"
+          cp target/release/libcudart.so "$LINUX/libcudart.so.12"
+          cp target/release/libcublas.so "$LINUX/libcublas.so.12"
+          ( cd "$LINUX"
+            ln -s libcuda.so.1   libcuda.so
+            ln -s libcudart.so.12 libcudart.so
+            ln -s libcublas.so.12 libcublas.so )
+          cp README.md LICENSE-APACHE LICENSE-MIT NOTICE "$LINUX/"
+          tar -czf "${LINUX}.tar.gz" "$LINUX"
+
+          # Windows: the DLL names NVIDIA's ship as, for a drop-in replacement.
+          WIN="ignuda-${VERSION}-windows-x86_64"
+          mkdir -p "$WIN"
+          cp target/x86_64-pc-windows-gnu/release/cuda.dll   "$WIN/nvcuda.dll"
+          cp target/x86_64-pc-windows-gnu/release/cudart.dll "$WIN/cudart64_12.dll"
+          cp target/x86_64-pc-windows-gnu/release/cublas.dll "$WIN/cublas64_12.dll"
+          cp README.md LICENSE-APACHE LICENSE-MIT NOTICE "$WIN/"
+          zip -r "${WIN}.zip" "$WIN"
+
+          # Checksums over the two archives.
+          sha256sum "${LINUX}.tar.gz" "${WIN}.zip" > SHA256SUMS
+
+          ls -l "${LINUX}.tar.gz" "${WIN}.zip" SHA256SUMS
+
+      - name: Upload build artifacts (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ignuda-${{ steps.ver.outputs.version }}
+          path: |
+            ignuda-*-linux-x86_64.tar.gz
+            ignuda-*-windows-x86_64.zip
+            SHA256SUMS
+
+      - name: Publish GitHub Release (tags only)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ignuda ${{ steps.ver.outputs.version }}
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: true # early prototype; flip when a release is stable
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            ignuda-*-linux-x86_64.tar.gz
+            ignuda-*-windows-x86_64.zip
+            SHA256SUMS
