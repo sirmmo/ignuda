@@ -174,6 +174,52 @@ dot-product extension).
 - **Phase 3 — speed.** `dp4a` + report cc 6.1; multi-stream concurrency;
   cuBLAS GEMM tiling (or dispatch GEMM to Intel oneMKL). Only after correctness.
 
+## Phase 0 results (verified 2026-10-13)
+
+Phase 0 was run against the freshly built libraries. **A full end-to-end Ollama
+run could not be done here**: building ggml's CUDA device code needs `nvcc`
+(the ignuda dev image is deliberately NVIDIA-free), so a real test needs either
+nvcc-built fatbins or a prebuilt Ollama CUDA runner — that packaging is itself
+Phase-1 infrastructure. Instead the gap list was confirmed directly against
+ignuda's exported symbols and the compiler's actual output. Results:
+
+**cuBLAS (`libcublas.so`)** — present: `cublasCreate_v2`, `cublasSetStream_v2`,
+`cublasSetMathMode`, `cublasSetWorkspace_v2`, `cublasSgemm_v2`. **Missing (real
+gaps):** `cublasGemmEx`, `cublasGemmStridedBatchedEx`, `cublasGemmBatchedEx`
+(core inference), `cublasSgemmStridedBatched`, `cublasSgemmBatched`,
+`cublasStrsmBatched` (the last only in `solve_tri` — non-core), and
+`cublasGetStatusString` / `cublasLoggerConfigure` (error/logging — trivial
+stubs).
+
+**CUDA runtime (`libcudart.so`)** — present: `cudaDeviceGetAttribute`,
+`cudaFuncSetAttribute`, `cudaFuncGetAttributes`, `cudaStreamCreateWithFlags`,
+`cudaEventCreateWithFlags`, `cudaHostGetDevicePointer`, **`cudaLaunchKernelExC`**.
+**Missing (real gaps):** `cudaGetDeviceProperties_v2` (the CUDA-12 symbol the
+header `#define`s `cudaGetDeviceProperties` to — **this is the one that matters**),
+`cudaSetDeviceFlags`, `cudaMemcpy2DAsync`, `cudaDeviceGetPCIBusId` (logging —
+minor). The peer-access entry points (`cudaDeviceCanAccessPeer`,
+`cudaDeviceEnablePeerAccess`, `cudaMemcpyPeerAsync`) and all VMM driver symbols
+(`cuMemCreate`/`cuMemMap`/…) are also absent, but those are avoided by the
+`-DGGML_CUDA_NO_PEER_COPY` / `-DGGML_CUDA_NO_VMM` build flags, so they are not
+gaps for this path.
+
+**Correction to the must-have list:** `cudaLaunchKernelEx` is **not** a gap —
+it is a header-inlined C++ wrapper over `cudaLaunchKernelExC`, which ignuda
+already exports. Requirement #4 above is narrowed accordingly.
+
+**Compiler** — the packed-fp16 gap reproduces exactly. A kernel with
+`cvt.rn.f16x2.f32` fails to compile with:
+
+```
+error: in function pack: line 13: cvt.rn.f16x2.f32: packed half conversions are not supported yet
+```
+
+So the Phase-1 must-haves are confirmed and sharpened: **`cublasGemmEx` +
+strided/batched (FP16)**, **packed `f16x2` in the compiler**, and
+**`cudaGetDeviceProperties_v2`** (plus the small trio `cudaSetDeviceFlags` /
+`cudaMemcpy2DAsync` / `cudaDeviceGetPCIBusId`). Everything else ggml needs is
+already exported or is avoided by build flags.
+
 ## Reality check
 
 The host-API surface is ~90% there already; the real work is **two focused
