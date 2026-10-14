@@ -31,6 +31,10 @@ set -e
   gcc -o cublas_gemmex_test cublas_gemmex_test.c -L$LIB -lcudart -lcublas -lm
   ./cublas_gemmex_test
 
+  echo "== cudaGetDeviceProperties =="
+  gcc -o device_props_test device_props_test.c -L$LIB -lcudart
+  IGNUDA_CC=5.2 ./device_props_test
+
   if command -v nvcc >/dev/null 2>&1; then
     echo "== runtime API (nvcc fatbin) =="
     nvcc -o runtime_test runtime_test.cu -cudart shared -gencode arch=compute_61,code=compute_61
