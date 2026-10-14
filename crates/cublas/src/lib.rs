@@ -23,18 +23,67 @@ pub const CUBLAS_STATUS_ALLOC_FAILED: cublasStatus_t = 3;
 pub const CUBLAS_STATUS_INVALID_VALUE: cublasStatus_t = 7;
 pub const CUBLAS_STATUS_EXECUTION_FAILED: cublasStatus_t = 13;
 pub const CUBLAS_STATUS_INTERNAL_ERROR: cublasStatus_t = 14;
+pub const CUBLAS_STATUS_NOT_SUPPORTED: cublasStatus_t = 15;
 
 pub type cublasHandle_t = *mut c_void;
 pub type cublasOperation_t = c_int; // 0 = N, 1 = T, 2 = C
 
+// cudaDataType_t (subset ggml/cublasGemmEx use).
+pub type cudaDataType = c_int;
+const CUDA_R_32F: cudaDataType = 0;
+const CUDA_R_16F: cudaDataType = 2;
+
+// cublasComputeType_t: the 16F variants carry a __half alpha/beta, the 32F
+// variants a float one. We always accumulate in f32 regardless.
+pub type cublasComputeType_t = c_int;
+const CUBLAS_COMPUTE_16F: cublasComputeType_t = 64;
+const CUBLAS_COMPUTE_16F_PEDANTIC: cublasComputeType_t = 65;
+
+/// IEEE half (as raw bits) -> f32. Handles subnormals, inf and NaN.
+fn f16_to_f32(h: u16) -> f32 {
+    let sign = ((h >> 15) & 1) as u32;
+    let exp = ((h >> 10) & 0x1f) as u32;
+    let mant = (h & 0x3ff) as u32;
+    let bits = if exp == 0 {
+        if mant == 0 {
+            sign << 31 // signed zero
+        } else {
+            // subnormal: normalize
+            let mut e: i32 = -1;
+            let mut m = mant;
+            loop {
+                e += 1;
+                m <<= 1;
+                if m & 0x400 != 0 {
+                    break;
+                }
+            }
+            let mant = (m & 0x3ff) << 13;
+            let exp = (127 - 15 - e) as u32;
+            (sign << 31) | (exp << 23) | mant
+        }
+    } else if exp == 0x1f {
+        // inf / NaN
+        (sign << 31) | (0xff << 23) | (mant << 13)
+    } else {
+        let exp = exp + (127 - 15);
+        (sign << 31) | (exp << 23) | (mant << 13)
+    };
+    f32::from_bits(bits)
+}
+
 const GEMM_PTX: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../kernels/gemm.ptx"));
+const GEMM_HALF_PTX: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../kernels/gemm_half.ptx"));
 
 struct Kernels {
     module: CUmodule,
+    hmodule: CUmodule,
     sgemm: CUfunction,
     dgemm: CUfunction,
     saxpy: CUfunction,
     sscal: CUfunction,
+    hgemm: CUfunction,
 }
 
 unsafe impl Send for Kernels {}
@@ -55,20 +104,28 @@ fn kernels() -> Result<&'static Kernels, cublasStatus_t> {
         if (drv.cuModuleLoadData)(&mut module, ptx.as_ptr() as *const c_void) != 0 {
             return Err(CUBLAS_STATUS_INTERNAL_ERROR);
         }
-        let get = |name: &str| -> CUfunction {
+        let mut hmodule: CUmodule = null_mut();
+        let hptx = std::ffi::CString::new(GEMM_HALF_PTX).unwrap();
+        if (drv.cuModuleLoadData)(&mut hmodule, hptx.as_ptr() as *const c_void) != 0 {
+            return Err(CUBLAS_STATUS_INTERNAL_ERROR);
+        }
+        let getf = |module: CUmodule, name: &str| -> CUfunction {
             let n = std::ffi::CString::new(name).unwrap();
             let mut f: CUfunction = null_mut();
             (drv.cuModuleGetFunction)(&mut f, module, n.as_ptr());
             f
         };
+        let get = |name: &str| getf(module, name);
         let k = Box::leak(Box::new(Kernels {
             module,
+            hmodule,
             sgemm: get("sgemm"),
             dgemm: get("dgemm"),
             saxpy: get("saxpy"),
             sscal: get("sscal"),
+            hgemm: getf(hmodule, "hgemm"),
         }));
-        if k.sgemm.is_null() {
+        if k.sgemm.is_null() || k.hgemm.is_null() {
             return Err(CUBLAS_STATUS_INTERNAL_ERROR);
         }
         *g = Some(k);
@@ -312,6 +369,274 @@ pub unsafe extern "C" fn cublasDgemm_v2(
         handle, k_.dgemm, transa, transb, m, n, k, alpha as *const c_void, a as u64, lda, b as u64, ldb,
         beta as *const c_void, c as u64, ldc, true,
     )
+}
+
+/// Read an alpha/beta scalar as f32, honouring pointer mode (host/device) and
+/// the compute type (16F compute => the scalar is a `__half`; else `float`).
+unsafe fn read_ab_f32(h: &Handle, p: *const c_void, compute_16f: bool) -> f32 {
+    if compute_16f {
+        let bits: u16 = scalar(h, p as *const u16);
+        f16_to_f32(bits)
+    } else {
+        scalar(h, p as *const f32)
+    }
+}
+
+/// Launch the hand-written FP16 GEMM (`kernels/gemm_half.ptx`). A and B are
+/// FP16; C is FP16 when `c_is_f32` is false, else FP32. alpha/beta are f32.
+#[allow(clippy::too_many_arguments)]
+unsafe fn launch_hgemm(
+    h: &Handle,
+    f: CUfunction,
+    transa: cublasOperation_t,
+    transb: cublasOperation_t,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: f32,
+    a: u64,
+    lda: c_int,
+    b: u64,
+    ldb: c_int,
+    beta: f32,
+    c: u64,
+    ldc: c_int,
+    c_is_f32: bool,
+) -> cublasStatus_t {
+    let drv = match drv::get() {
+        Some(d) => d,
+        None => return CUBLAS_STATUS_NOT_INITIALIZED,
+    };
+    let mut ta: c_int = (transa != 0) as c_int;
+    let mut tb: c_int = (transb != 0) as c_int;
+    let (mut m, mut n, mut k) = (m, n, k);
+    let (mut lda, mut ldb, mut ldc) = (lda, ldb, ldc);
+    let alpha = alpha;
+    let beta = beta;
+    let mut a_ptr = a;
+    let mut b_ptr = b;
+    let c_ptr = c;
+    let mut cflag: c_int = c_is_f32 as c_int;
+
+    let block = [16u32, 16, 1];
+    let grid = [((m as u32) + 15) / 16, ((n as u32) + 15) / 16, 1];
+    let mut args: Vec<*mut c_void> = vec![
+        &mut ta as *mut _ as *mut c_void,
+        &mut tb as *mut _ as *mut c_void,
+        &mut m as *mut _ as *mut c_void,
+        &mut n as *mut _ as *mut c_void,
+        &mut k as *mut _ as *mut c_void,
+        &alpha as *const _ as *mut c_void,
+        &mut a_ptr as *mut _ as *mut c_void,
+        &mut lda as *mut _ as *mut c_void,
+        &mut b_ptr as *mut _ as *mut c_void,
+        &mut ldb as *mut _ as *mut c_void,
+        &beta as *const _ as *mut c_void,
+        &c_ptr as *const _ as *mut c_void,
+        &mut ldc as *mut _ as *mut c_void,
+        &mut cflag as *mut _ as *mut c_void,
+    ];
+    let r = (drv.cuLaunchKernel)(
+        f, grid[0], grid[1], grid[2], block[0], block[1], block[2], 0, h.stream, args.as_mut_ptr(), null_mut(),
+    );
+    if r != 0 {
+        CUBLAS_STATUS_EXECUTION_FAILED
+    } else {
+        CUBLAS_STATUS_SUCCESS
+    }
+}
+
+/// Dispatch one GEMM for the `Ex` family. Supports the two combinations ggml
+/// uses on an iGPU: FP16 A/B with FP16 or FP32 C (compute 32F or 16F), and the
+/// all-FP32 case (delegated to `sgemm`). Everything else is NOT_SUPPORTED.
+#[allow(clippy::too_many_arguments)]
+unsafe fn gemm_ex_one(
+    handle: cublasHandle_t,
+    k_: &Kernels,
+    transa: cublasOperation_t,
+    transb: cublasOperation_t,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: *const c_void,
+    a: u64,
+    atype: cudaDataType,
+    lda: c_int,
+    b: u64,
+    btype: cudaDataType,
+    ldb: c_int,
+    beta: *const c_void,
+    c: u64,
+    ctype: cudaDataType,
+    ldc: c_int,
+    compute: cublasComputeType_t,
+) -> cublasStatus_t {
+    if handle.is_null() {
+        return CUBLAS_STATUS_NOT_INITIALIZED;
+    }
+    let h = &*(handle as *const Handle);
+    let compute_16f = compute == CUBLAS_COMPUTE_16F || compute == CUBLAS_COMPUTE_16F_PEDANTIC;
+
+    if atype == CUDA_R_16F && btype == CUDA_R_16F && (ctype == CUDA_R_16F || ctype == CUDA_R_32F) {
+        let alpha = read_ab_f32(h, alpha, compute_16f);
+        let beta = read_ab_f32(h, beta, compute_16f);
+        return launch_hgemm(
+            h, k_.hgemm, transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc, ctype == CUDA_R_32F,
+        );
+    }
+    if atype == CUDA_R_32F && btype == CUDA_R_32F && ctype == CUDA_R_32F {
+        // Reuse the FP32 kernel. alpha/beta are float for 32F compute.
+        return launch_gemm(
+            handle, k_.sgemm, transa, transb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc, false,
+        );
+    }
+    CUBLAS_STATUS_NOT_SUPPORTED
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cublasGemmEx(
+    handle: cublasHandle_t,
+    transa: cublasOperation_t,
+    transb: cublasOperation_t,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: *const c_void,
+    a: *const c_void,
+    atype: cudaDataType,
+    lda: c_int,
+    b: *const c_void,
+    btype: cudaDataType,
+    ldb: c_int,
+    beta: *const c_void,
+    c: *mut c_void,
+    ctype: cudaDataType,
+    ldc: c_int,
+    compute: cublasComputeType_t,
+    _algo: c_int,
+) -> cublasStatus_t {
+    let k_ = match kernels() {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    gemm_ex_one(
+        handle, k_, transa, transb, m, n, k, alpha, a as u64, atype, lda, b as u64, btype, ldb, beta, c as u64,
+        ctype, ldc, compute,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cublasGemmStridedBatchedEx(
+    handle: cublasHandle_t,
+    transa: cublasOperation_t,
+    transb: cublasOperation_t,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: *const c_void,
+    a: *const c_void,
+    atype: cudaDataType,
+    lda: c_int,
+    stride_a: i64,
+    b: *const c_void,
+    btype: cudaDataType,
+    ldb: c_int,
+    stride_b: i64,
+    beta: *const c_void,
+    c: *mut c_void,
+    ctype: cudaDataType,
+    ldc: c_int,
+    stride_c: i64,
+    batch_count: c_int,
+    compute: cublasComputeType_t,
+    _algo: c_int,
+) -> cublasStatus_t {
+    let k_ = match kernels() {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    // Strides are in elements; convert to bytes per operand element size.
+    let a_es = elem_size(atype);
+    let b_es = elem_size(btype);
+    let c_es = elem_size(ctype);
+    for i in 0..batch_count as i64 {
+        let ai = (a as u64).wrapping_add((i * stride_a * a_es as i64) as u64);
+        let bi = (b as u64).wrapping_add((i * stride_b * b_es as i64) as u64);
+        let ci = (c as u64).wrapping_add((i * stride_c * c_es as i64) as u64);
+        let r = gemm_ex_one(
+            handle, k_, transa, transb, m, n, k, alpha, ai, atype, lda, bi, btype, ldb, beta, ci, ctype, ldc,
+            compute,
+        );
+        if r != CUBLAS_STATUS_SUCCESS {
+            return r;
+        }
+    }
+    CUBLAS_STATUS_SUCCESS
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cublasGemmBatchedEx(
+    handle: cublasHandle_t,
+    transa: cublasOperation_t,
+    transb: cublasOperation_t,
+    m: c_int,
+    n: c_int,
+    k: c_int,
+    alpha: *const c_void,
+    aarray: *const *const c_void,
+    atype: cudaDataType,
+    lda: c_int,
+    barray: *const *const c_void,
+    btype: cudaDataType,
+    ldb: c_int,
+    beta: *const c_void,
+    carray: *const *mut c_void,
+    ctype: cudaDataType,
+    ldc: c_int,
+    batch_count: c_int,
+    compute: cublasComputeType_t,
+    _algo: c_int,
+) -> cublasStatus_t {
+    let k_ = match kernels() {
+        Ok(k) => k,
+        Err(e) => return e,
+    };
+    if batch_count <= 0 {
+        return CUBLAS_STATUS_SUCCESS;
+    }
+    // The three arrays hold `batch_count` device pointers and themselves live in
+    // device memory; copy them to the host so we can launch one GEMM per entry.
+    let n_ptr = batch_count as usize;
+    let mut a_ptrs = vec![0u64; n_ptr];
+    let mut b_ptrs = vec![0u64; n_ptr];
+    let mut c_ptrs = vec![0u64; n_ptr];
+    let drv = match drv::get() {
+        Some(d) => d,
+        None => return CUBLAS_STATUS_NOT_INITIALIZED,
+    };
+    let bytes = n_ptr * std::mem::size_of::<u64>();
+    (drv.cuMemcpy)(a_ptrs.as_mut_ptr() as u64, aarray as u64, bytes);
+    (drv.cuMemcpy)(b_ptrs.as_mut_ptr() as u64, barray as u64, bytes);
+    (drv.cuMemcpy)(c_ptrs.as_mut_ptr() as u64, carray as u64, bytes);
+    (drv.cuCtxSynchronize)();
+    for i in 0..n_ptr {
+        let r = gemm_ex_one(
+            handle, k_, transa, transb, m, n, k, alpha, a_ptrs[i], atype, lda, b_ptrs[i], btype, ldb, beta,
+            c_ptrs[i], ctype, ldc, compute,
+        );
+        if r != CUBLAS_STATUS_SUCCESS {
+            return r;
+        }
+    }
+    CUBLAS_STATUS_SUCCESS
+}
+
+/// Byte size of a `cudaDataType` element we support.
+fn elem_size(t: cudaDataType) -> usize {
+    match t {
+        CUDA_R_16F => 2,
+        _ => 4, // CUDA_R_32F and anything else we route to the FP32 path
+    }
 }
 
 #[no_mangle]

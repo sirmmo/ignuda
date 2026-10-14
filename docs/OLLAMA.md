@@ -220,6 +220,21 @@ strided/batched (FP16)**, **packed `f16x2` in the compiler**, and
 `cudaMemcpy2DAsync` / `cudaDeviceGetPCIBusId`). Everything else ggml needs is
 already exported or is avoided by build flags.
 
+### Phase-1 progress
+
+- **Packed `f16x2`/`bf16x2` in the compiler — done** (`cvt`/add/sub/mul/fma/
+  min/max/neg/abs), verified numerically on the CPU runtime. See
+  `crates/ptx2spirv/tests/packed_half.rs`.
+- **`cublasGemmEx` + `cublasGemmStridedBatchedEx` + `cublasGemmBatchedEx`
+  (FP16) — done.** A hand-written FP16 GEMM (`kernels/gemm_half.ptx`, since the
+  dev image has no nvcc) covers FP16 A/B with FP16 or FP32 C; the all-FP32 case
+  reuses `sgemm`; unsupported type combinations return `CUBLAS_STATUS_NOT_
+  SUPPORTED`. alpha/beta are read as `__half` or `float` per the compute type.
+  Verified end to end against a CPU reference in `samples/cublas_gemmex_test.c`.
+  Not yet covered: BF16 inputs (`CUDA_R_16BF`) and INT8 (`dp4a`) — follow-ups.
+- **`cudaGetDeviceProperties_v2` — pending.** Needs the exact `cudaDeviceProp`
+  struct layout, which must be pinned against the real CUDA 12 header.
+
 ## Reality check
 
 The host-API surface is ~90% there already; the real work is **two focused
