@@ -27,6 +27,10 @@ set -e
   gcc -o cublas_test cublas_test.c -L$LIB -lcudart -lcublas
   ./cublas_test
 
+  echo "== cuBLAS GemmEx (FP16) =="
+  gcc -o cublas_gemmex_test cublas_gemmex_test.c -L$LIB -lcudart -lcublas -lm
+  ./cublas_gemmex_test
+
   if command -v nvcc >/dev/null 2>&1; then
     echo "== runtime API (nvcc fatbin) =="
     nvcc -o runtime_test runtime_test.cu -cudart shared -gencode arch=compute_61,code=compute_61

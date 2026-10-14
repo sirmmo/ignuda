@@ -60,7 +60,7 @@ jobs:
         run: |
           set -e
           PTX2SPV=target/release/ptx2spv
-          for ptx in kernels/gemm.ptx samples/kernels.ptx; do
+          for ptx in kernels/gemm.ptx kernels/gemm_half.ptx samples/kernels.ptx; do
             out="${ptx##*/}"; out="${out%.ptx}.spv"
             echo "== $ptx -> $out =="
             "$PTX2SPV" "$ptx" "$out"
@@ -153,6 +153,15 @@ jobs:
         run: |
           gcc -o cublas_test cublas_test.c -L"$IGNUDA_LIB" -lcudart -lcublas
           ./cublas_test
+
+      - name: cuBLAS GemmEx sample (FP16 vs CPU reference)
+        working-directory: samples
+        env:
+          LD_LIBRARY_PATH: ${{ env.IGNUDA_LIB }}
+          IGNUDA_DEVICE_TYPE: cpu
+        run: |
+          gcc -o cublas_gemmex_test cublas_gemmex_test.c -L"$IGNUDA_LIB" -lcudart -lcublas -lm
+          ./cublas_gemmex_test
 
   # Style and lint checks. Advisory for now: the tree is not yet rustfmt/clippy
   # clean, so this reports problems without failing the build.
