@@ -232,8 +232,16 @@ already exported or is avoided by build flags.
   SUPPORTED`. alpha/beta are read as `__half` or `float` per the compute type.
   Verified end to end against a CPU reference in `samples/cublas_gemmex_test.c`.
   Not yet covered: BF16 inputs (`CUDA_R_16BF`) and INT8 (`dp4a`) — follow-ups.
-- **`cudaGetDeviceProperties_v2` — pending.** Needs the exact `cudaDeviceProp`
-  struct layout, which must be pinned against the real CUDA 12 header.
+- **`cudaGetDeviceProperties_v2` — done.** The CUDA 12 `cudaDeviceProp` is
+  reproduced field-for-field in declaration order; a compile-time assertion
+  pins `sizeof == 1032` (CUDA 12.x) and `samples/device_props_test.c` validates
+  the offsets independently (warpSize, major/minor from `IGNUDA_CC`, and the
+  deep `sharedMemPerBlockOptin` all read correct values). Also added the small
+  trio ggml wants: `cudaSetDeviceFlags`, `cudaMemcpy2DAsync` (USM row-copy) and
+  `cudaDeviceGetPCIBusId`. compute capability comes from the driver, so
+  `IGNUDA_CC` controls which ggml fallback paths are taken.
+
+With these three, the Phase-1 must-haves are complete.
 
 ## Reality check
 
