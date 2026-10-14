@@ -410,6 +410,245 @@ pub unsafe extern "C" fn cudaGetDevice(dev: *mut c_int) -> cudaError_t {
     set_err(cudaSuccess)
 }
 
+/// CUDA 12 `cudaDeviceProp`, reproduced field-for-field in declaration order so
+/// `#[repr(C)]` yields the exact ABI offsets a consumer (ggml) compiled against
+/// the real header expects. The size assertion below pins it to CUDA 12.x's
+/// `sizeof(cudaDeviceProp) == 1032`; the fields ggml reads (`name`, `major`,
+/// `minor`, `multiProcessorCount`, `sharedMemPerBlock`, `sharedMemPerBlockOptin`,
+/// `warpSize`, `integrated`) all sit in the stable middle of the struct.
+#[repr(C)]
+pub struct cudaDeviceProp {
+    pub name: [c_char; 256],
+    pub uuid: [c_char; 16],
+    pub luid: [c_char; 8],
+    pub luidDeviceNodeMask: c_uint,
+    pub totalGlobalMem: usize,
+    pub sharedMemPerBlock: usize,
+    pub regsPerBlock: c_int,
+    pub warpSize: c_int,
+    pub memPitch: usize,
+    pub maxThreadsPerBlock: c_int,
+    pub maxThreadsDim: [c_int; 3],
+    pub maxGridSize: [c_int; 3],
+    pub clockRate: c_int,
+    pub totalConstMem: usize,
+    pub major: c_int,
+    pub minor: c_int,
+    pub textureAlignment: usize,
+    pub texturePitchAlignment: usize,
+    pub deviceOverlap: c_int,
+    pub multiProcessorCount: c_int,
+    pub kernelExecTimeoutEnabled: c_int,
+    pub integrated: c_int,
+    pub canMapHostMemory: c_int,
+    pub computeMode: c_int,
+    pub maxTexture1D: c_int,
+    pub maxTexture1DMipmap: c_int,
+    pub maxTexture1DLinear: c_int,
+    pub maxTexture2D: [c_int; 2],
+    pub maxTexture2DMipmap: [c_int; 2],
+    pub maxTexture2DLinear: [c_int; 3],
+    pub maxTexture2DGather: [c_int; 2],
+    pub maxTexture3D: [c_int; 3],
+    pub maxTexture3DAlt: [c_int; 3],
+    pub maxTextureCubemap: c_int,
+    pub maxTexture1DLayered: [c_int; 2],
+    pub maxTexture2DLayered: [c_int; 3],
+    pub maxTextureCubemapLayered: [c_int; 2],
+    pub maxSurface1D: c_int,
+    pub maxSurface2D: [c_int; 2],
+    pub maxSurface3D: [c_int; 3],
+    pub maxSurface1DLayered: [c_int; 2],
+    pub maxSurface2DLayered: [c_int; 3],
+    pub maxSurfaceCubemap: c_int,
+    pub maxSurfaceCubemapLayered: [c_int; 2],
+    pub surfaceAlignment: usize,
+    pub concurrentKernels: c_int,
+    pub ECCEnabled: c_int,
+    pub pciBusID: c_int,
+    pub pciDeviceID: c_int,
+    pub pciDomainID: c_int,
+    pub tccDriver: c_int,
+    pub asyncEngineCount: c_int,
+    pub unifiedAddressing: c_int,
+    pub memoryClockRate: c_int,
+    pub memoryBusWidth: c_int,
+    pub l2CacheSize: c_int,
+    pub persistingL2CacheMaxSize: c_int,
+    pub maxThreadsPerMultiProcessor: c_int,
+    pub streamPrioritiesSupported: c_int,
+    pub globalL1CacheSupported: c_int,
+    pub localL1CacheSupported: c_int,
+    pub sharedMemPerMultiprocessor: usize,
+    pub regsPerMultiprocessor: c_int,
+    pub managedMemory: c_int,
+    pub isMultiGpuBoard: c_int,
+    pub multiGpuBoardGroupID: c_int,
+    pub hostNativeAtomicSupported: c_int,
+    pub singleToDoublePrecisionPerfRatio: c_int,
+    pub pageableMemoryAccess: c_int,
+    pub concurrentManagedAccess: c_int,
+    pub computePreemptionSupported: c_int,
+    pub canUseHostPointerForRegisteredMem: c_int,
+    pub cooperativeLaunch: c_int,
+    pub cooperativeMultiDeviceLaunch: c_int,
+    pub sharedMemPerBlockOptin: usize,
+    pub pageableMemoryAccessUsesHostPageTables: c_int,
+    pub directManagedMemAccessFromHost: c_int,
+    pub maxBlocksPerMultiProcessor: c_int,
+    pub accessPolicyMaxWindowSize: c_int,
+    pub reservedSharedMemPerBlock: usize,
+    pub hostRegisterSupported: c_int,
+    pub sparseCudaArraySupported: c_int,
+    pub hostRegisterReadOnlySupported: c_int,
+    pub timelineSemaphoreInteropSupported: c_int,
+    pub memoryPoolsSupported: c_int,
+    pub gpuDirectRDMASupported: c_int,
+    pub gpuDirectRDMAFlushWritesOptions: c_uint,
+    pub gpuDirectRDMAWritesOrdering: c_int,
+    pub memoryPoolSupportedHandleTypes: c_uint,
+    pub deferredMappingCudaArraySupported: c_int,
+    pub ipcEventSupported: c_int,
+    pub clusterLaunch: c_int,
+    pub unifiedFunctionPointers: c_int,
+    pub reserved: [c_int; 63],
+}
+
+const _: () = assert!(std::mem::size_of::<cudaDeviceProp>() == 1032);
+
+#[no_mangle]
+pub unsafe extern "C" fn cudaGetDeviceProperties_v2(prop: *mut cudaDeviceProp, dev: c_int) -> cudaError_t {
+    if prop.is_null() {
+        return set_err(cudaErrorInvalidValue);
+    }
+    if let Err(e) = ensure_context() {
+        return set_err(e);
+    }
+    let drv = d().unwrap();
+    std::ptr::write_bytes(prop as *mut u8, 0, std::mem::size_of::<cudaDeviceProp>());
+    let p = &mut *prop;
+
+    (drv.cuDeviceGetName)(p.name.as_mut_ptr(), p.name.len() as c_int, dev);
+    (drv.cuDeviceGetUuid_v2)(p.uuid.as_mut_ptr() as *mut [u8; 16], dev);
+    let mut tot: usize = 0;
+    (drv.cuDeviceTotalMem_v2)(&mut tot, dev);
+    p.totalGlobalMem = tot;
+
+    // Driver CU_DEVICE_ATTRIBUTE_* values (the runtime enum differs; here we
+    // query the driver directly, so these are the driver numbers).
+    let a = |attr: c_int| -> c_int {
+        let mut v = 0;
+        (drv.cuDeviceGetAttribute)(&mut v, attr, dev);
+        v
+    };
+    p.major = a(75);
+    p.minor = a(76);
+    p.warpSize = a(10);
+    p.maxThreadsPerBlock = a(1);
+    p.maxThreadsDim = [a(2), a(3), a(4)];
+    p.maxGridSize = [a(5), a(6), a(7)];
+    p.clockRate = a(13);
+    p.totalConstMem = a(9) as usize;
+    p.sharedMemPerBlock = a(8) as usize;
+    p.sharedMemPerBlockOptin = a(97) as usize;
+    p.sharedMemPerMultiprocessor = a(81) as usize;
+    p.regsPerBlock = a(12);
+    p.regsPerMultiprocessor = a(82);
+    p.multiProcessorCount = a(16);
+    p.maxThreadsPerMultiProcessor = a(39);
+    p.maxBlocksPerMultiProcessor = a(106);
+    p.integrated = a(18);
+    p.canMapHostMemory = a(19);
+    p.unifiedAddressing = a(41);
+    p.managedMemory = a(83);
+    p.concurrentKernels = a(31);
+    p.asyncEngineCount = a(40);
+    p.cooperativeLaunch = a(95);
+    p.memoryClockRate = a(36);
+    p.memoryBusWidth = a(37);
+    p.l2CacheSize = a(38);
+    p.textureAlignment = a(14) as usize;
+    p.pciBusID = a(33);
+    p.pciDeviceID = a(34);
+    p.pciDomainID = a(50);
+    set_err(cudaSuccess)
+}
+
+/// CUDA 12 `#define`s `cudaGetDeviceProperties` to the `_v2` symbol; a few
+/// binaries still import the plain name. Both fill the CUDA 12 `cudaDeviceProp`.
+#[no_mangle]
+pub unsafe extern "C" fn cudaGetDeviceProperties(prop: *mut cudaDeviceProp, dev: c_int) -> cudaError_t {
+    cudaGetDeviceProperties_v2(prop, dev)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cudaSetDeviceFlags(_flags: c_uint) -> cudaError_t {
+    set_err(cudaSuccess)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cudaGetDeviceFlags(flags: *mut c_uint) -> cudaError_t {
+    if !flags.is_null() {
+        *flags = 0;
+    }
+    set_err(cudaSuccess)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cudaDeviceGetPCIBusId(buf: *mut c_char, len: c_int, dev: c_int) -> cudaError_t {
+    if buf.is_null() || len <= 0 {
+        return set_err(cudaErrorInvalidValue);
+    }
+    if let Err(e) = ensure_context() {
+        return set_err(e);
+    }
+    let drv = d().unwrap();
+    cu!((drv.cuDeviceGetPCIBusId)(buf, len, dev));
+    set_err(cudaSuccess)
+}
+
+/// 2D (pitched) copies. ignuda's memory is USM, so host and device pointers are
+/// both plain addresses; copy row by row through the 1D driver copy.
+#[no_mangle]
+pub unsafe extern "C" fn cudaMemcpy2DAsync(
+    dst: *mut c_void,
+    dpitch: usize,
+    src: *const c_void,
+    spitch: usize,
+    width: usize,
+    height: usize,
+    _kind: c_int,
+    stream: CUstream,
+) -> cudaError_t {
+    if let Err(e) = ensure_context() {
+        return set_err(e);
+    }
+    let drv = d().unwrap();
+    for row in 0..height {
+        let s = (src as u64) + (row * spitch) as u64;
+        let dd = (dst as u64) + (row * dpitch) as u64;
+        cu!((drv.cuMemcpyAsync)(dd, s, width, stream));
+    }
+    set_err(cudaSuccess)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cudaMemcpy2D(
+    dst: *mut c_void,
+    dpitch: usize,
+    src: *const c_void,
+    spitch: usize,
+    width: usize,
+    height: usize,
+    kind: c_int,
+) -> cudaError_t {
+    let r = cudaMemcpy2DAsync(dst, dpitch, src, spitch, width, height, kind, null_mut());
+    if r != cudaSuccess {
+        return r;
+    }
+    cudaDeviceSynchronize()
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn cudaDeviceSynchronize() -> cudaError_t {
     if let Err(e) = ensure_context() {

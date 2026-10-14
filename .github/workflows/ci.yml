@@ -163,6 +163,16 @@ jobs:
           gcc -o cublas_gemmex_test cublas_gemmex_test.c -L"$IGNUDA_LIB" -lcudart -lcublas -lm
           ./cublas_gemmex_test
 
+      - name: Device properties sample (cudaGetDeviceProperties)
+        working-directory: samples
+        env:
+          LD_LIBRARY_PATH: ${{ env.IGNUDA_LIB }}
+          IGNUDA_DEVICE_TYPE: cpu
+          IGNUDA_CC: "5.2"
+        run: |
+          gcc -o device_props_test device_props_test.c -L"$IGNUDA_LIB" -lcudart
+          ./device_props_test
+
   # Style and lint checks. Advisory for now: the tree is not yet rustfmt/clippy
   # clean, so this reports problems without failing the build.
   lint:
